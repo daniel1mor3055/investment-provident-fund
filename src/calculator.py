@@ -1,502 +1,701 @@
-"""
-Core calculation logic for Gemel Lehashkaa (Investment Provident Fund) simulation.
+"""Core calculation logic for Provident Fund vs Personal Investment comparison."""
 
-This module implements the financial formulas for:
-- Monthly balance updates with fees and returns
-- Annual contribution cap enforcement
-- Real (inflation-adjusted) gain tax calculation
-- Comparison between different scenarios
-"""
-
-import copy
-from dataclasses import replace
 from typing import Optional
-
-import numpy as np
 import pandas as pd
+import numpy as np
 
 from .models import (
-    ANNUITY_MIN_AGE,
-    InvestmentInputs,
-    MonthlyResult,
-    SimulationResult,
+    ProvidentInputs,
     YearlyResult,
-    ComparisonResult,
+    TaxCalculation,
+    AgeComparisonResult,
+    ComparisonSummary,
+    SensitivityPoint,
+    MonthlyWithdrawalResult,
 )
 
 
-# ============================================================================
-# Core Simulation
-# ============================================================================
-
-
-def calculate_monthly_rate(annual_rate: float) -> float:
+def calculate_future_value(
+    annual_contribution: float,
+    annual_return: float,
+    years: int,
+) -> float:
     """
-    Convert annual rate to monthly rate.
+    Calculate future value with annual contributions.
 
-    Formula: r_m = (1 + R)^(1/12) - 1
+    Uses the future value of annuity formula:
+    FV = PMT * [((1 + r)^n - 1) / r]
 
     Args:
-        annual_rate: Annual rate (e.g., 0.05 for 5%)
+        annual_contribution: Annual contribution amount
+        annual_return: Annual return rate (e.g., 0.07 for 7%)
+        years: Number of years
 
     Returns:
-        Monthly rate
+        Future value at the end of the period
     """
-    return (1 + annual_rate) ** (1 / 12) - 1
+    if years <= 0:
+        return 0.0
+    
+    if annual_return == 0:
+        return annual_contribution * years
+    
+    # Future value of annuity (payments at end of each period)
+    fv = annual_contribution * (((1 + annual_return) ** years - 1) / annual_return)
+    return fv
 
 
-def simulate(inputs: InvestmentInputs) -> SimulationResult:
+def calculate_inflation_adjusted_contributions(
+    annual_contribution: float,
+    inflation_rate: float,
+    years: int,
+) -> float:
     """
-    Run a complete simulation of Investment Provident Fund growth.
+    Calculate the inflation-adjusted value of contributions at withdrawal time.
 
-    Implements the formula:
-        B_{t+1} = (B_t + D_t * (1 - F_d)) * (1 + r_m) * (1 - f_m)
-
-    Where:
-        - B_t: Balance at month t
-        - D_t: Deposit at month t (respecting annual cap)
-        - F_d: Deposit fee
-        - r_m: Monthly return rate
-        - f_m: Monthly AUM fee
-
-    Tax calculation:
-        - Lump sum: Tax = τ * max(B_T - Basis_real, 0)
-        - Annuity after 60: Tax = 0
+    Each contribution is adjusted for inflation from the time it was made
+    to the withdrawal date.
 
     Args:
-        inputs: InvestmentInputs with all parameters
+        annual_contribution: Annual contribution amount
+        inflation_rate: Annual inflation rate (e.g., 0.025 for 2.5%)
+        years: Number of years
 
     Returns:
-        SimulationResult with complete simulation data
+        Sum of inflation-adjusted contributions
     """
-    # Convert annual rates to monthly
-    monthly_return = calculate_monthly_rate(inputs.expected_return)
-    monthly_fee = inputs.fee_aum / 12  # Simple division for AUM fee
-    monthly_inflation = calculate_monthly_rate(inputs.inflation)
+    if years <= 0:
+        return 0.0
+    
+    # Each year's contribution is adjusted for remaining years of inflation
+    # Year 1 contribution grows by inflation for (years-1) years
+    # Year 2 contribution grows by inflation for (years-2) years
+    # etc.
+    total = 0.0
+    for year in range(1, years + 1):
+        years_to_grow = years - year
+        adjusted = annual_contribution * ((1 + inflation_rate) ** years_to_grow)
+        total += adjusted
+    
+    return total
 
-    # Initialize tracking variables
-    balance = 0.0
-    total_contributions = 0.0
-    monthly_results: list[MonthlyResult] = []
-    yearly_results: list[YearlyResult] = []
 
-    # Track cap enforcement
-    cap_was_binding = False
-    cap_limited_amount = 0.0
+def calculate_provident_tax(
+    gross_balance: float,
+    total_contributions: float,
+    inflation_adjusted_contributions: float,
+    capital_gains_tax: float,
+    withdrawal_mode: str,
+    age_at_withdrawal: int,
+) -> TaxCalculation:
+    """
+    Calculate tax for Provident Fund withdrawal.
 
-    # Track yearly contributions for cap enforcement
-    year_contributions = 0.0
-    current_year = 1
+    - Lump sum: 25% tax on REAL gains (inflation-adjusted)
+    - Annuity after 60: 0% tax on gains
 
-    # Track real basis (inflation-adjusted contributions)
-    # Each contribution is indexed forward to the withdrawal date
-    total_months = inputs.months_of_contribution
-    contribution_records: list[tuple[int, float]] = []  # (month, amount)
+    Args:
+        gross_balance: Total balance at withdrawal
+        total_contributions: Sum of nominal contributions
+        inflation_adjusted_contributions: Inflation-adjusted contributions
+        capital_gains_tax: Tax rate (e.g., 0.25)
+        withdrawal_mode: "lump_sum" or "annuity"
+        age_at_withdrawal: Age when withdrawing
 
-    for month in range(total_months):
-        # Check if we're in a new year (every 12 months)
-        year_of_contribution = (month // 12) + 1
-        if year_of_contribution > current_year:
-            # Save yearly result for previous year
-            yearly_results.append(
-                YearlyResult(
-                    year=current_year,
-                    age=inputs.start_age + current_year,
-                    balance=balance,
-                    contributions_ytd=year_contributions,
-                    cumulative_contributions=total_contributions,
-                    real_basis=_calculate_real_basis(
-                        contribution_records, month, monthly_inflation
-                    ),
-                )
-            )
-            current_year = year_of_contribution
-            year_contributions = 0.0
-
-        # Calculate contribution respecting annual cap
-        desired_contribution = inputs.monthly_contribution
-        remaining_cap = inputs.annual_cap - year_contributions
-
-        if remaining_cap <= 0:
-            actual_contribution = 0.0
-            cap_was_binding = True
-            cap_limited_amount += desired_contribution
-        elif desired_contribution > remaining_cap:
-            actual_contribution = remaining_cap
-            cap_was_binding = True
-            cap_limited_amount += desired_contribution - remaining_cap
-        else:
-            actual_contribution = desired_contribution
-
-        # Apply deposit fee
-        net_contribution = actual_contribution * (1 - inputs.fee_deposit)
-
-        # Update balance: add contribution, apply return, deduct AUM fee
-        balance = (balance + net_contribution) * (1 + monthly_return) * (1 - monthly_fee)
-
-        # Track contributions
-        if actual_contribution > 0:
-            contribution_records.append((month, actual_contribution))
-        total_contributions += actual_contribution
-        year_contributions += actual_contribution
-
-        # Calculate current real basis
-        current_real_basis = _calculate_real_basis(
-            contribution_records, month, monthly_inflation
-        )
-
-        # Store monthly result
-        monthly_results.append(
-            MonthlyResult(
-                month=month,
-                age=inputs.start_age + (month / 12),
-                balance=balance,
-                contribution=actual_contribution,
-                real_basis=current_real_basis,
-                cumulative_contributions=total_contributions,
-            )
-        )
-
-    # Add final year result
-    if year_contributions > 0 or len(yearly_results) == 0:
-        final_real_basis = _calculate_real_basis(
-            contribution_records, total_months - 1, monthly_inflation
-        )
-        yearly_results.append(
-            YearlyResult(
-                year=current_year,
-                age=inputs.withdraw_age,
-                balance=balance,
-                contributions_ytd=year_contributions,
-                cumulative_contributions=total_contributions,
-                real_basis=final_real_basis,
-            )
-        )
-
-    # Calculate final real basis and tax
-    real_basis = _calculate_real_basis(
-        contribution_records, total_months - 1, monthly_inflation
-    )
-    real_gain = balance - real_basis
-
+    Returns:
+        TaxCalculation with all details
+    """
+    nominal_gain = max(0, gross_balance - total_contributions)
+    real_gain = max(0, gross_balance - inflation_adjusted_contributions)
+    
     # Determine tax based on withdrawal mode
-    if inputs.withdrawal_mode == "annuity" and inputs.withdraw_age >= ANNUITY_MIN_AGE:
+    if withdrawal_mode == "annuity" and age_at_withdrawal >= 60:
+        # Annuity after 60: No tax on gains
         tax_amount = 0.0
     else:
-        tax_amount = inputs.capital_gains_tax * max(real_gain, 0)
-
-    net_balance = balance - tax_amount
-
-    return SimulationResult(
-        inputs=inputs,
-        monthly_results=monthly_results,
-        yearly_results=yearly_results,
-        gross_balance=balance,
+        # Lump sum: 25% on real gains
+        tax_amount = capital_gains_tax * real_gain
+    
+    net_balance = gross_balance - tax_amount
+    
+    return TaxCalculation(
+        gross_balance=gross_balance,
         total_contributions=total_contributions,
-        real_basis=real_basis,
+        inflation_adjusted_contributions=inflation_adjusted_contributions,
+        nominal_gain=nominal_gain,
         real_gain=real_gain,
         tax_amount=tax_amount,
         net_balance=net_balance,
-        cap_was_binding=cap_was_binding,
-        cap_limited_amount=cap_limited_amount,
     )
 
 
-def _calculate_real_basis(
-    contribution_records: list[tuple[int, float]],
-    current_month: int,
-    monthly_inflation: float,
-) -> float:
+def calculate_personal_tax(
+    gross_balance: float,
+    total_contributions: float,
+    capital_gains_tax: float,
+) -> TaxCalculation:
     """
-    Calculate the inflation-adjusted cost basis.
+    Calculate tax for personal account withdrawal.
 
-    Formula: Basis_real = Σ D_t * (1 + π_m)^(T - t)
-
-    Each contribution is indexed forward from its deposit month
-    to the current/withdrawal month.
+    Personal account: 25% tax on NOMINAL gains.
 
     Args:
-        contribution_records: List of (month, amount) tuples
-        current_month: Current month number
-        monthly_inflation: Monthly inflation rate
+        gross_balance: Total balance at withdrawal
+        total_contributions: Sum of nominal contributions
+        capital_gains_tax: Tax rate (e.g., 0.25)
 
     Returns:
-        Real (inflation-adjusted) cost basis
+        TaxCalculation with all details
     """
-    real_basis = 0.0
-    for month, amount in contribution_records:
-        months_elapsed = current_month - month
-        # Index the contribution forward by inflation
-        indexed_amount = amount * ((1 + monthly_inflation) ** months_elapsed)
-        real_basis += indexed_amount
-    return real_basis
+    nominal_gain = max(0, gross_balance - total_contributions)
+    
+    # Personal account: tax on nominal gains
+    tax_amount = capital_gains_tax * nominal_gain
+    net_balance = gross_balance - tax_amount
+    
+    return TaxCalculation(
+        gross_balance=gross_balance,
+        total_contributions=total_contributions,
+        inflation_adjusted_contributions=total_contributions,  # Not relevant for personal
+        nominal_gain=nominal_gain,
+        real_gain=nominal_gain,  # Same as nominal for personal
+        tax_amount=tax_amount,
+        net_balance=net_balance,
+    )
 
 
-# ============================================================================
-# Comparison Functions
-# ============================================================================
-
-
-def compare_start_ages(
-    base_inputs: InvestmentInputs,
-    ages: Optional[list[int]] = None,
-) -> ComparisonResult:
+def calculate_comparison_for_starting_age(
+    starting_age: int,
+    inputs: ProvidentInputs,
+) -> AgeComparisonResult:
     """
-    Compare simulation results for different starting ages.
+    Calculate comparison results for a specific starting age.
 
     Args:
-        base_inputs: Base input parameters (start_age will be overridden)
-        ages: List of starting ages to compare (default: [30, 40, 50, 59])
+        starting_age: Age at which investment begins
+        inputs: All input parameters
 
     Returns:
-        ComparisonResult with scenarios keyed by "Age {age}"
+        AgeComparisonResult with full comparison
     """
-    if ages is None:
-        ages = [30, 40, 50, 59]
+    investment_years = inputs.retirement_age - starting_age
+    
+    if investment_years <= 0:
+        return AgeComparisonResult(
+            starting_age=starting_age,
+            retirement_age=inputs.retirement_age,
+            investment_years=0,
+            provident_gross=0,
+            provident_contributions=0,
+            provident_tax=0,
+            provident_net=0,
+            personal_gross=0,
+            personal_contributions=0,
+            personal_tax=0,
+            personal_net=0,
+            withdrawal_mode=inputs.withdrawal_mode,
+        )
+    
+    # Use the same contribution for both accounts (apples-to-apples comparison)
+    # The cap only applies in real-world limits, but for comparison we use equal amounts
+    provident_contribution = inputs.annual_contribution
+    personal_contribution = inputs.annual_contribution
+    
+    # Calculate net returns
+    provident_net_return = inputs.get_provident_net_return()
+    personal_net_return = inputs.get_personal_net_return()
+    
+    # Calculate future values
+    provident_gross = calculate_future_value(
+        provident_contribution, provident_net_return, investment_years
+    )
+    personal_gross = calculate_future_value(
+        personal_contribution, personal_net_return, investment_years
+    )
+    
+    # Calculate contributions
+    provident_contributions = provident_contribution * investment_years
+    personal_contributions = personal_contribution * investment_years
+    
+    # Calculate inflation-adjusted contributions for provident
+    provident_inflation_adjusted = calculate_inflation_adjusted_contributions(
+        provident_contribution, inputs.inflation_rate, investment_years
+    )
+    
+    # Calculate taxes
+    provident_tax_calc = calculate_provident_tax(
+        gross_balance=provident_gross,
+        total_contributions=provident_contributions,
+        inflation_adjusted_contributions=provident_inflation_adjusted,
+        capital_gains_tax=inputs.capital_gains_tax,
+        withdrawal_mode=inputs.withdrawal_mode,
+        age_at_withdrawal=inputs.retirement_age,
+    )
+    
+    personal_tax_calc = calculate_personal_tax(
+        gross_balance=personal_gross,
+        total_contributions=personal_contributions,
+        capital_gains_tax=inputs.capital_gains_tax,
+    )
+    
+    return AgeComparisonResult(
+        starting_age=starting_age,
+        retirement_age=inputs.retirement_age,
+        investment_years=investment_years,
+        provident_gross=provident_gross,
+        provident_contributions=provident_contributions,
+        provident_tax=provident_tax_calc.tax_amount,
+        provident_net=provident_tax_calc.net_balance,
+        personal_gross=personal_gross,
+        personal_contributions=personal_contributions,
+        personal_tax=personal_tax_calc.tax_amount,
+        personal_net=personal_tax_calc.net_balance,
+        withdrawal_mode=inputs.withdrawal_mode,
+    )
 
-    scenarios: dict[str, SimulationResult] = {}
 
-    for age in ages:
-        if age >= base_inputs.withdraw_age:
-            continue  # Skip invalid combinations
-
-        modified_inputs = replace(base_inputs, start_age=age)
-        result = simulate(modified_inputs)
-        scenarios[f"Age {age}"] = result
-
-    # Use the earliest start age as baseline
-    baseline_name = f"Age {min(ages)}" if ages else ""
-
-    return ComparisonResult(scenarios=scenarios, baseline_name=baseline_name)
-
-
-def compare_withdrawal_modes(
-    inputs: InvestmentInputs,
-) -> dict[str, SimulationResult]:
+def find_crossover_age(
+    inputs: ProvidentInputs,
+    min_age: int = 18,
+    max_age: int = 59,
+) -> Optional[int]:
     """
-    Compare lump sum vs annuity withdrawal modes.
+    Find the starting age where Provident Fund becomes better than personal.
+
+    Searches from max_age down to min_age to find the oldest age where
+    Provident Fund first becomes advantageous.
 
     Args:
-        inputs: Input parameters (withdrawal_mode will be overridden)
+        inputs: All input parameters
+        min_age: Minimum age to consider
+        max_age: Maximum age to consider
 
     Returns:
-        Dict with "Lump Sum" and "Annuity" results
+        The crossover age, or None if Provident is never better
     """
-    lump_inputs = replace(inputs, withdrawal_mode="lump")
-    annuity_inputs = replace(inputs, withdrawal_mode="annuity")
+    # Start from oldest age and work backwards
+    # We want to find the LATEST age where provident is still better
+    # because that tells us "from what age onwards should you use provident"
+    
+    crossover_age = None
+    
+    for age in range(min_age, max_age + 1):
+        result = calculate_comparison_for_starting_age(age, inputs)
+        if result.provident_wins:
+            crossover_age = age
+            break  # Found the first age where provident wins
+    
+    return crossover_age
 
-    return {
-        "Lump Sum": simulate(lump_inputs),
-        "Annuity": simulate(annuity_inputs),
-    }
 
-
-def compare_fees(
-    base_inputs: InvestmentInputs,
-    fee_levels: Optional[list[float]] = None,
-) -> dict[str, SimulationResult]:
+def run_full_comparison(
+    inputs: ProvidentInputs,
+    min_age: int = 18,
+    max_age: int = 59,
+) -> ComparisonSummary:
     """
-    Compare simulation results for different AUM fee levels.
+    Run a complete comparison across all starting ages.
 
     Args:
-        base_inputs: Base input parameters
-        fee_levels: List of AUM fee rates (default: [0.004, 0.0065, 0.0105])
+        inputs: All input parameters
+        min_age: Minimum starting age to analyze
+        max_age: Maximum starting age to analyze
 
     Returns:
-        Dict with results keyed by fee level description
+        ComparisonSummary with results for all ages
     """
-    if fee_levels is None:
-        fee_levels = [0.004, 0.0065, 0.0105]  # Low, Medium, High (max legal)
+    age_results = []
+    
+    for age in range(min_age, max_age + 1):
+        result = calculate_comparison_for_starting_age(age, inputs)
+        age_results.append(result)
+    
+    crossover_age = find_crossover_age(inputs, min_age, max_age)
+    
+    return ComparisonSummary(
+        inputs=inputs,
+        age_results=age_results,
+        crossover_age=crossover_age,
+        provident_net_return=inputs.get_provident_net_return(),
+        personal_net_return=inputs.get_personal_net_return(),
+    )
 
-    results: dict[str, SimulationResult] = {}
 
-    for fee in fee_levels:
-        modified_inputs = replace(base_inputs, fee_aum=fee)
-        result = simulate(modified_inputs)
-        results[f"{fee:.2%} AUM Fee"] = result
+def generate_yearly_growth(
+    inputs: ProvidentInputs,
+) -> list[YearlyResult]:
+    """
+    Generate year-by-year growth data for visualization.
 
+    Args:
+        inputs: All input parameters
+
+    Returns:
+        List of YearlyResult for each year from current age to retirement
+    """
+    results = []
+    investment_years = inputs.get_investment_years()
+    
+    if investment_years <= 0:
+        return results
+    
+    # Use the same contribution for both accounts (apples-to-apples comparison)
+    provident_contribution = inputs.annual_contribution
+    personal_contribution = inputs.annual_contribution
+
+    provident_net_return = inputs.get_provident_net_return()
+    personal_net_return = inputs.get_personal_net_return()
+
+    for year in range(1, investment_years + 1):
+        age = inputs.current_age + year
+        
+        provident_fv = calculate_future_value(
+            provident_contribution, provident_net_return, year
+        )
+        provident_contributions = provident_contribution * year
+        
+        personal_fv = calculate_future_value(
+            personal_contribution, personal_net_return, year
+        )
+        personal_contributions = personal_contribution * year
+        
+        results.append(YearlyResult(
+            year=year,
+            age=age,
+            provident_fv=provident_fv,
+            provident_contributions=provident_contributions,
+            personal_fv=personal_fv,
+            personal_contributions=personal_contributions,
+        ))
+    
     return results
 
 
-# ============================================================================
-# Sensitivity Analysis
-# ============================================================================
+def generate_comparison_dataframe(
+    summary: ComparisonSummary,
+) -> pd.DataFrame:
+    """
+    Generate a pandas DataFrame from comparison results.
+
+    Args:
+        summary: ComparisonSummary from run_full_comparison
+
+    Returns:
+        DataFrame with comparison data by starting age
+    """
+    data = []
+    for result in summary.age_results:
+        data.append({
+            "Starting Age": result.starting_age,
+            "Years to Invest": result.investment_years,
+            "Provident Gross": result.provident_gross,
+            "Provident Tax": result.provident_tax,
+            "Provident Net": result.provident_net,
+            "Personal Gross": result.personal_gross,
+            "Personal Tax": result.personal_tax,
+            "Personal Net": result.personal_net,
+            "Difference": result.difference,
+            "Difference %": result.difference_pct,
+            "Winner": result.winner,
+        })
+    return pd.DataFrame(data)
+
+
+def generate_yearly_dataframe(
+    yearly_results: list[YearlyResult],
+) -> pd.DataFrame:
+    """
+    Generate a pandas DataFrame from yearly growth results.
+
+    Args:
+        yearly_results: List of YearlyResult
+
+    Returns:
+        DataFrame with yearly growth data
+    """
+    data = []
+    for yr in yearly_results:
+        data.append({
+            "Year": yr.year,
+            "Age": yr.age,
+            "Provident Balance": yr.provident_fv,
+            "Provident Contributions": yr.provident_contributions,
+            "Provident Gain": yr.provident_gain,
+            "Personal Balance": yr.personal_fv,
+            "Personal Contributions": yr.personal_contributions,
+            "Personal Gain": yr.personal_gain,
+        })
+    return pd.DataFrame(data)
+
+
+def generate_sensitivity_analysis(
+    base_inputs: ProvidentInputs,
+    return_rates: list[float] = None,
+    inflation_rates: list[float] = None,
+) -> list[SensitivityPoint]:
+    """
+    Generate sensitivity analysis data.
+
+    Args:
+        base_inputs: Base input parameters
+        return_rates: List of return rates to test
+        inflation_rates: List of inflation rates to test
+
+    Returns:
+        List of SensitivityPoint for each combination
+    """
+    if return_rates is None:
+        return_rates = [0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10]
+    
+    if inflation_rates is None:
+        inflation_rates = [0.01, 0.02, 0.025, 0.03, 0.04]
+    
+    results = []
+    
+    for ret in return_rates:
+        for inf in inflation_rates:
+            # Create modified inputs (use same return for both in sensitivity analysis)
+            modified_inputs = ProvidentInputs(
+                current_age=base_inputs.current_age,
+                retirement_age=base_inputs.retirement_age,
+                life_expectancy=base_inputs.life_expectancy,
+                annual_contribution=base_inputs.annual_contribution,
+                annual_cap=base_inputs.annual_cap,
+                provident_expected_return=ret,
+                personal_expected_return=ret,  # Same return for sensitivity analysis
+                inflation_rate=inf,
+                provident_mgmt_fee=base_inputs.provident_mgmt_fee,
+                personal_mgmt_fee=base_inputs.personal_mgmt_fee,
+                capital_gains_tax=base_inputs.capital_gains_tax,
+                withdrawal_mode=base_inputs.withdrawal_mode,
+            )
+            
+            # Find crossover
+            crossover = find_crossover_age(modified_inputs)
+            
+            # Calculate advantage at age 30
+            test_inputs = ProvidentInputs(
+                current_age=30,
+                retirement_age=base_inputs.retirement_age,
+                life_expectancy=base_inputs.life_expectancy,
+                annual_contribution=base_inputs.annual_contribution,
+                annual_cap=base_inputs.annual_cap,
+                provident_expected_return=ret,
+                personal_expected_return=ret,
+                inflation_rate=inf,
+                provident_mgmt_fee=base_inputs.provident_mgmt_fee,
+                personal_mgmt_fee=base_inputs.personal_mgmt_fee,
+                capital_gains_tax=base_inputs.capital_gains_tax,
+                withdrawal_mode=base_inputs.withdrawal_mode,
+            )
+            result_at_30 = calculate_comparison_for_starting_age(30, test_inputs)
+            
+            results.append(SensitivityPoint(
+                return_rate=ret,
+                inflation_rate=inf,
+                crossover_age=crossover,
+                provident_advantage_at_30=result_at_30.difference,
+            ))
+    
+    return results
 
 
 def generate_sensitivity_matrix(
-    base_inputs: InvestmentInputs,
-    param1_name: str,
-    param1_values: list[float],
-    param2_name: str,
-    param2_values: list[float],
-    output_metric: str = "net_balance",
+    base_inputs: ProvidentInputs,
+    return_rates: list[float] = None,
+    inflation_rates: list[float] = None,
 ) -> pd.DataFrame:
     """
-    Generate a sensitivity matrix for two parameters.
+    Generate a sensitivity matrix as a DataFrame.
+
+    Shows crossover age for different combinations of return and inflation.
 
     Args:
         base_inputs: Base input parameters
-        param1_name: Name of first parameter (row axis)
-        param1_values: Values to test for first parameter
-        param2_name: Name of second parameter (column axis)
-        param2_values: Values to test for second parameter
-        output_metric: Which result metric to show ("net_balance", "tax_amount", etc.)
+        return_rates: List of return rates to test
+        inflation_rates: List of inflation rates to test
 
     Returns:
-        DataFrame with param1 as index, param2 as columns, values are the metric
+        DataFrame with return rates as rows and inflation rates as columns
     """
-    matrix = np.zeros((len(param1_values), len(param2_values)))
-
-    for i, p1_val in enumerate(param1_values):
-        for j, p2_val in enumerate(param2_values):
-            # Create modified inputs
-            modified = copy.copy(base_inputs)
-            setattr(modified, param1_name, p1_val)
-            setattr(modified, param2_name, p2_val)
-
-            # Run simulation
-            try:
-                result = simulate(modified)
-                matrix[i, j] = getattr(result, output_metric)
-            except (ValueError, AttributeError):
-                matrix[i, j] = np.nan
-
-    # Create DataFrame with formatted labels
-    df = pd.DataFrame(
-        matrix,
-        index=[_format_param_value(param1_name, v) for v in param1_values],
-        columns=[_format_param_value(param2_name, v) for v in param2_values],
-    )
-    df.index.name = param1_name
-    df.columns.name = param2_name
-
-    return df
-
-
-def _format_param_value(param_name: str, value: float) -> str:
-    """Format parameter value for display."""
-    if param_name in ("expected_return", "fee_aum", "fee_deposit", "inflation"):
-        return f"{value:.2%}"
-    elif param_name == "start_age":
-        return f"Age {int(value)}"
-    elif param_name == "monthly_contribution":
-        return f"₪{value:,.0f}"
-    else:
-        return str(value)
-
-
-def calculate_fee_impact(
-    base_inputs: InvestmentInputs,
-    fee_range: Optional[list[float]] = None,
-) -> pd.DataFrame:
-    """
-    Calculate the impact of different fee levels on final balance.
-
-    Args:
-        base_inputs: Base input parameters
-        fee_range: List of fee rates to test
-
-    Returns:
-        DataFrame with fee levels and corresponding net balances
-    """
-    if fee_range is None:
-        fee_range = [0.003, 0.004, 0.005, 0.006, 0.007, 0.008, 0.009, 0.0105]
-
+    if return_rates is None:
+        return_rates = [0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.10]
+    
+    if inflation_rates is None:
+        inflation_rates = [0.01, 0.02, 0.025, 0.03, 0.04]
+    
     data = []
-    for fee in fee_range:
-        modified = replace(base_inputs, fee_aum=fee)
-        result = simulate(modified)
-        data.append(
-            {
-                "AUM Fee": fee,
-                "AUM Fee %": f"{fee:.2%}",
-                "Gross Balance": result.gross_balance,
-                "Net Balance": result.net_balance,
-                "Tax Amount": result.tax_amount,
-                "Fee Cost": result.total_contributions
-                * (1 + base_inputs.expected_return) ** base_inputs.years_of_contribution
-                - result.gross_balance,
-            }
-        )
-
-    return pd.DataFrame(data)
-
-
-# ============================================================================
-# DataFrame Generation
-# ============================================================================
-
-
-def generate_yearly_dataframe(result: SimulationResult) -> pd.DataFrame:
-    """
-    Convert simulation result to a yearly DataFrame for display.
-
-    Args:
-        result: SimulationResult from simulation
-
-    Returns:
-        DataFrame with yearly data
-    """
-    data = []
-    for yr in result.yearly_results:
-        data.append(
-            {
-                "Year": yr.year,
-                "Age": yr.age,
-                "Contributions (Year)": yr.contributions_ytd,
-                "Total Contributions": yr.cumulative_contributions,
-                "Balance": yr.balance,
-                "Real Basis": yr.real_basis,
-            }
-        )
-
+    for ret in return_rates:
+        row = {"Return": f"{ret*100:.0f}%"}
+        for inf in inflation_rates:
+            modified_inputs = ProvidentInputs(
+                current_age=base_inputs.current_age,
+                retirement_age=base_inputs.retirement_age,
+                life_expectancy=base_inputs.life_expectancy,
+                annual_contribution=base_inputs.annual_contribution,
+                annual_cap=base_inputs.annual_cap,
+                provident_expected_return=ret,
+                personal_expected_return=ret,  # Same return for sensitivity matrix
+                inflation_rate=inf,
+                provident_mgmt_fee=base_inputs.provident_mgmt_fee,
+                personal_mgmt_fee=base_inputs.personal_mgmt_fee,
+                capital_gains_tax=base_inputs.capital_gains_tax,
+                withdrawal_mode=base_inputs.withdrawal_mode,
+            )
+            crossover = find_crossover_age(modified_inputs)
+            row[f"Inflation {inf*100:.1f}%"] = crossover if crossover else "Never"
+        data.append(row)
+    
     df = pd.DataFrame(data)
+    df.set_index("Return", inplace=True)
     return df
 
 
-def generate_comparison_dataframe(
-    comparison: ComparisonResult,
-) -> pd.DataFrame:
+def calculate_tax_comparison(
+    inputs: ProvidentInputs,
+) -> dict:
     """
-    Generate a summary DataFrame comparing multiple scenarios.
+    Calculate detailed tax comparison for visualization.
 
     Args:
-        comparison: ComparisonResult with multiple scenarios
+        inputs: All input parameters
 
     Returns:
-        DataFrame with summary metrics for each scenario
+        Dictionary with tax details for both options
     """
-    data = []
-    for name, result in comparison.scenarios.items():
-        data.append(
-            {
-                "Scenario": name,
-                "Years": result.inputs.years_of_contribution,
-                "Total Contributions": result.total_contributions,
-                "Gross Balance": result.gross_balance,
-                "Tax": result.tax_amount,
-                "Net Balance": result.net_balance,
-                "Effective Tax Rate": result.effective_tax_rate,
-                "Cap Binding": result.cap_was_binding,
-            }
-        )
+    result = calculate_comparison_for_starting_age(inputs.current_age, inputs)
+    investment_years = inputs.get_investment_years()
+    
+    # Use same contribution for both (apples-to-apples)
+    provident_contribution = inputs.annual_contribution
+    provident_contributions = provident_contribution * investment_years
+    provident_inflation_adjusted = calculate_inflation_adjusted_contributions(
+        provident_contribution, inputs.inflation_rate, investment_years
+    )
+    
+    personal_contribution = inputs.annual_contribution
+    personal_contributions = personal_contribution * investment_years
+    
+    return {
+        "provident": {
+            "gross": result.provident_gross,
+            "contributions": provident_contributions,
+            "inflation_adjusted_contributions": provident_inflation_adjusted,
+            "nominal_gain": result.provident_gross - provident_contributions,
+            "real_gain": result.provident_gross - provident_inflation_adjusted,
+            "tax": result.provident_tax,
+            "net": result.provident_net,
+            "tax_type": "0% (Annuity)" if inputs.withdrawal_mode == "annuity" and inputs.retirement_age >= 60 else "25% Real Gains",
+        },
+        "personal": {
+            "gross": result.personal_gross,
+            "contributions": personal_contributions,
+            "nominal_gain": result.personal_gross - personal_contributions,
+            "tax": result.personal_tax,
+            "net": result.personal_net,
+            "tax_type": "25% Nominal Gains",
+        },
+    }
 
-    return pd.DataFrame(data)
 
-
-def generate_start_age_comparison_df(
-    base_inputs: InvestmentInputs,
-    ages: Optional[list[int]] = None,
-) -> pd.DataFrame:
+def calculate_monthly_withdrawal(
+    balance: float,
+    withdrawal_years: int,
+    annual_return_during_withdrawal: float,
+) -> float:
     """
-    Generate a DataFrame comparing different starting ages.
-
+    Calculate sustainable monthly withdrawal using annuity formula.
+    
+    This calculates how much you can withdraw monthly so that the balance
+    is depleted over the specified number of years, assuming the remaining
+    balance earns the specified return.
+    
+    Uses the PMT formula: PMT = PV * [r / (1 - (1 + r)^-n)]
+    
     Args:
-        base_inputs: Base input parameters
-        ages: List of starting ages to compare
-
+        balance: Total balance at start of withdrawals
+        withdrawal_years: Number of years to withdraw over
+        annual_return_during_withdrawal: Expected annual return during withdrawal
+        
     Returns:
-        DataFrame with comparison data
+        Monthly withdrawal amount
     """
-    comparison = compare_start_ages(base_inputs, ages)
-    return generate_comparison_dataframe(comparison)
+    if withdrawal_years <= 0 or balance <= 0:
+        return 0.0
+    
+    # Convert to monthly rate and periods
+    monthly_rate = annual_return_during_withdrawal / 12
+    total_months = withdrawal_years * 12
+    
+    if monthly_rate == 0:
+        return balance / total_months
+    
+    # PMT formula for annuity
+    monthly_withdrawal = balance * (monthly_rate / (1 - (1 + monthly_rate) ** -total_months))
+    return monthly_withdrawal
+
+
+def calculate_monthly_withdrawal_comparison(
+    inputs: ProvidentInputs,
+) -> MonthlyWithdrawalResult:
+    """
+    Calculate monthly withdrawal comparison between provident fund and personal account.
+    
+    For provident fund annuity (קצבה): 0% tax on withdrawals after age 60
+    For personal account: 25% capital gains tax on the gains portion of each withdrawal
+    
+    Args:
+        inputs: All input parameters
+        
+    Returns:
+        MonthlyWithdrawalResult with comparison details
+    """
+    # Get the comparison result at retirement
+    result = calculate_comparison_for_starting_age(inputs.current_age, inputs)
+    
+    # Calculate withdrawal period
+    withdrawal_years = inputs.life_expectancy - inputs.retirement_age
+    if withdrawal_years <= 0:
+        withdrawal_years = 1  # Minimum 1 year
+    
+    # Use a conservative return during withdrawal (lower than accumulation phase)
+    # Typically 3-4% is assumed for retirement withdrawals
+    withdrawal_return = 0.03  # 3% conservative return during withdrawal
+    
+    # Calculate gross monthly withdrawals
+    provident_gross_monthly = calculate_monthly_withdrawal(
+        result.provident_gross, withdrawal_years, withdrawal_return
+    )
+    personal_gross_monthly = calculate_monthly_withdrawal(
+        result.personal_gross, withdrawal_years, withdrawal_return
+    )
+    
+    # Provident fund annuity: 0% tax (after age 60)
+    provident_net_monthly = provident_gross_monthly  # No tax on annuity
+    
+    # Personal account: 25% tax on gains portion
+    # Calculate the gain ratio (what portion of the balance is gains vs contributions)
+    if result.personal_gross > 0:
+        gain_ratio = (result.personal_gross - result.personal_contributions) / result.personal_gross
+    else:
+        gain_ratio = 0.0
+    
+    # Each withdrawal is proportionally gains + principal
+    # Only the gains portion is taxed at 25%
+    taxable_per_month = personal_gross_monthly * gain_ratio
+    tax_per_month = taxable_per_month * inputs.capital_gains_tax
+    personal_net_monthly = personal_gross_monthly - tax_per_month
+    
+    return MonthlyWithdrawalResult(
+        provident_balance=result.provident_gross,
+        provident_contributions=result.provident_contributions,
+        provident_gross_monthly=provident_gross_monthly,
+        provident_net_monthly=provident_net_monthly,
+        personal_balance=result.personal_gross,
+        personal_contributions=result.personal_contributions,
+        personal_gross_monthly=personal_gross_monthly,
+        personal_net_monthly=personal_net_monthly,
+        personal_tax_per_month=tax_per_month,
+        withdrawal_years=withdrawal_years,
+        withdrawal_return=withdrawal_return,
+    )

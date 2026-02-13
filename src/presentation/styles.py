@@ -59,32 +59,56 @@ CUSTOM_CSS = """
         border-radius: 4px 4px 0 0;
     }
 
-    /* Sidebar styling */
+    /* Sidebar styling - Black background with white text */
     section[data-testid="stSidebar"] {
-        background-color: #f8f9fa;
+        background-color: #0e1117;
+    }
+
+    section[data-testid="stSidebar"] > div {
+        background-color: #0e1117;
     }
 
     section[data-testid="stSidebar"] .stMarkdown {
-        color: #1f1f1f;
+        color: #ffffff;
+    }
+
+    section[data-testid="stSidebar"] .stMarkdown p {
+        color: #ffffff;
+    }
+
+    section[data-testid="stSidebar"] .stMarkdown li {
+        color: #ffffff;
     }
 
     section[data-testid="stSidebar"] h1,
     section[data-testid="stSidebar"] h2,
-    section[data-testid="stSidebar"] h3 {
-        color: #0e1117;
+    section[data-testid="stSidebar"] h3,
+    section[data-testid="stSidebar"] h4 {
+        color: #ffffff;
     }
 
     /* Sidebar input labels */
     section[data-testid="stSidebar"] label {
-        color: #0e1117;
+        color: #ffffff !important;
         font-weight: 500;
+    }
+
+    section[data-testid="stSidebar"] .stSlider label p {
+        color: #ffffff !important;
     }
 
     /* Sidebar number inputs */
     section[data-testid="stSidebar"] input[type="number"] {
-        background-color: white;
-        color: #0e1117;
-        border: 1px solid #d1d5db;
+        background-color: #1e2127;
+        color: #ffffff;
+        border: 1px solid #3d4249;
+    }
+
+    /* Sidebar text inputs */
+    section[data-testid="stSidebar"] input[type="text"] {
+        background-color: #1e2127;
+        color: #ffffff;
+        border: 1px solid #3d4249;
     }
 
     /* Sidebar sliders */
@@ -102,9 +126,43 @@ CUSTOM_CSS = """
         background-color: #ff4b4b;
     }
 
+    /* Sidebar slider value text */
+    section[data-testid="stSidebar"] [data-baseweb="slider"] div {
+        color: #ffffff;
+    }
+
     /* Sidebar radio buttons */
     section[data-testid="stSidebar"] [role="radiogroup"] label {
-        color: #0e1117;
+        color: #ffffff;
+    }
+
+    section[data-testid="stSidebar"] [role="radiogroup"] label span {
+        color: #ffffff !important;
+    }
+
+    /* Sidebar info/success/warning boxes */
+    section[data-testid="stSidebar"] [data-testid="stAlert"] {
+        background-color: #1e2127;
+        color: #ffffff;
+    }
+
+    section[data-testid="stSidebar"] [data-testid="stAlert"] p {
+        color: #ffffff;
+    }
+
+    /* Sidebar divider */
+    section[data-testid="stSidebar"] hr {
+        border-color: #3d4249;
+    }
+
+    /* Sidebar help text */
+    section[data-testid="stSidebar"] .stTooltipIcon {
+        color: #9ca3af;
+    }
+
+    /* Sidebar subheader styling */
+    section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] {
+        color: #ffffff;
     }
 
     /* Expander styling */

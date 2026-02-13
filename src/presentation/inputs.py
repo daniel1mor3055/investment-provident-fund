@@ -1,197 +1,219 @@
-"""
-Streamlit sidebar input widgets for Gemel Lehashkaa analysis.
-
-This module provides the user interface for inputting all simulation parameters.
-"""
+"""Streamlit input components for the sidebar."""
 
 import streamlit as st
-
-from ..models import (
-    InvestmentInputs,
-    ANNUAL_CAP_2026,
-    MAX_FEE_AUM,
-    MAX_FEE_DEPOSIT,
-)
+from ..models import ProvidentInputs
 
 
-def render_sidebar_inputs() -> InvestmentInputs:
+# Constants for 2026
+DEFAULT_ANNUAL_CAP = 83641  # NIS for 2026
+DEFAULT_CONTRIBUTION = 83641  # Max out by default
+
+
+def render_sidebar_inputs() -> ProvidentInputs:
     """
-    Render the sidebar input widgets and return the collected inputs.
+    Render all input controls in the sidebar and return the collected inputs.
 
     Returns:
-        InvestmentInputs dataclass with all user-specified parameters
+        ProvidentInputs dataclass with all user inputs
     """
-    st.sidebar.header("📊 Simulation Parameters")
+    st.sidebar.header("Investment Parameters")
 
-    # Age Settings
+    # Age settings
     st.sidebar.subheader("Age Settings")
-
-    start_age = st.sidebar.slider(
-        "Start Age",
+    
+    current_age = st.sidebar.slider(
+        "Your Current Age",
         min_value=18,
         max_value=59,
         value=30,
-        step=1,
-        help="Age when you start contributing to the fund",
+        help="Your current age. This determines how many years until retirement.",
     )
 
-    withdraw_age = st.sidebar.slider(
-        "Withdrawal Age",
-        min_value=start_age + 1,
-        max_value=75,
+    retirement_age = st.sidebar.slider(
+        "Target Retirement Age",
+        min_value=60,
+        max_value=70,
         value=60,
-        step=1,
-        help="Age when you plan to withdraw (60+ for tax-free annuity)",
+        help="Age at which you plan to withdraw. Must be 60+ for annuity tax benefit.",
     )
 
-    # Contribution Settings
+    life_expectancy = st.sidebar.slider(
+        "Life Expectancy",
+        min_value=70,
+        max_value=100,
+        value=85,
+        help="Expected lifespan. Used to calculate monthly withdrawal amounts (קצבה).",
+    )
+
+    # Contribution settings
     st.sidebar.subheader("Contributions")
 
-    monthly_contribution = st.sidebar.number_input(
-        "Monthly Contribution (₪)",
-        min_value=0.0,
-        max_value=10000.0,
-        value=6970.0,  # ~83,641 / 12
-        step=100.0,
-        help="Amount to contribute each month",
+    annual_contribution = st.sidebar.number_input(
+        "Annual Contribution (₪)",
+        min_value=0,
+        max_value=500_000,
+        value=DEFAULT_CONTRIBUTION,
+        step=1_000,
+        help="Your annual contribution. Will be capped at the legal limit for Provident Fund.",
     )
 
     annual_cap = st.sidebar.number_input(
-        "Annual Cap (₪)",
-        min_value=0.0,
-        max_value=200000.0,
-        value=float(ANNUAL_CAP_2026),
-        step=1000.0,
-        help=f"Annual contribution limit (2026 cap: ₪{ANNUAL_CAP_2026:,.0f})",
+        "Provident Fund Annual Cap (₪)",
+        min_value=0,
+        max_value=200_000,
+        value=DEFAULT_ANNUAL_CAP,
+        step=1_000,
+        help="Legal annual contribution limit for Provident Fund (83,641 for 2026).",
     )
 
-    # Returns & Fees
-    st.sidebar.subheader("Returns & Fees")
+    # Show effective contribution
+    effective_contrib = min(annual_contribution, annual_cap)
+    if annual_contribution > annual_cap:
+        st.sidebar.warning(
+            f"Provident Fund capped at ₪{annual_cap:,}. "
+            f"Personal account: ₪{annual_contribution:,}"
+        )
 
-    expected_return = st.sidebar.slider(
-        "Expected Annual Return (%)",
-        min_value=0.0,
-        max_value=15.0,
-        value=5.0,
+    # Provident Fund Return Assumptions
+    st.sidebar.subheader("Provident Fund Returns")
+
+    provident_expected_return = st.sidebar.slider(
+        "Expected Return (%)",
+        min_value=3.0,
+        max_value=12.0,
+        value=7.0,
         step=0.5,
-        help="Expected nominal annual return before fees",
+        help="Expected annual return for Provident Fund before fees.",
+        key="provident_return",
     ) / 100
 
-    fee_aum = st.sidebar.slider(
-        "AUM Fee (%)",
+    provident_mgmt_fee = st.sidebar.slider(
+        "Management Fee (%)",
         min_value=0.0,
-        max_value=MAX_FEE_AUM * 100,
-        value=0.65,
+        max_value=1.05,
+        value=0.60,
         step=0.05,
-        help=f"Annual fee on assets (legal cap: {MAX_FEE_AUM:.2%})",
+        help="Annual management fee for Provident Fund (max 1.05% by law).",
     ) / 100
 
-    show_advanced = st.sidebar.checkbox("Show Advanced Options", value=False)
+    # Show provident net return
+    provident_net = (1 + provident_expected_return) * (1 - provident_mgmt_fee) - 1
+    st.sidebar.info(f"**Net Return After Fees:** {provident_net*100:.2f}%")
 
-    if show_advanced:
-        fee_deposit = st.sidebar.slider(
-            "Deposit Fee (%)",
-            min_value=0.0,
-            max_value=MAX_FEE_DEPOSIT * 100,
-            value=0.0,
-            step=0.1,
-            help=f"Fee on contributions (legal cap: {MAX_FEE_DEPOSIT:.2%})",
-        ) / 100
-    else:
-        fee_deposit = 0.0
+    # Personal Account Return Assumptions
+    st.sidebar.subheader("Personal Account Returns")
+
+    personal_expected_return = st.sidebar.slider(
+        "Expected Return (%)",
+        min_value=3.0,
+        max_value=15.0,
+        value=8.0,
+        step=0.5,
+        help="Expected annual return for personal account (e.g., S&P 500 ETF).",
+        key="personal_return",
+    ) / 100
+
+    personal_mgmt_fee = st.sidebar.slider(
+        "Personal Account Fee (%)",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.10,
+        step=0.05,
+        help="Annual fee for personal account (ETFs typically 0.03%-0.20%).",
+    ) / 100
+
+    # Show personal net return
+    personal_net = (1 + personal_expected_return) * (1 - personal_mgmt_fee) - 1
+    st.sidebar.info(f"**Net Return After Fees:** {personal_net*100:.2f}%")
 
     # Inflation
     st.sidebar.subheader("Inflation")
 
-    inflation = st.sidebar.slider(
-        "Expected Inflation (%)",
+    inflation_rate = st.sidebar.slider(
+        "Inflation Rate (%)",
         min_value=0.0,
-        max_value=10.0,
+        max_value=5.0,
         value=2.5,
-        step=0.1,
-        help="Expected annual inflation rate (for real gain tax calculation)",
+        step=0.5,
+        help="Annual inflation rate. Used to calculate real gains for Provident Fund lump sum tax.",
     ) / 100
 
-    # Withdrawal Mode
-    st.sidebar.subheader("Withdrawal Mode")
+    # Tax settings
+    st.sidebar.subheader("Tax Settings")
+
+    capital_gains_tax = st.sidebar.slider(
+        "Capital Gains Tax (%)",
+        min_value=0.0,
+        max_value=35.0,
+        value=25.0,
+        step=1.0,
+        help="Capital gains tax rate (25% standard in Israel).",
+    ) / 100
+
+    # Withdrawal mode
+    st.sidebar.subheader("Withdrawal Strategy")
 
     withdrawal_mode = st.sidebar.radio(
-        "How will you withdraw?",
-        options=["annuity", "lump"],
-        format_func=lambda x: "Annuity (Tax-Free after 60)" if x == "annuity" else "Lump Sum (25% Tax on Real Gains)",
-        help="Annuity conversion after age 60 is tax-free",
+        "Provident Fund Withdrawal Mode",
+        options=["annuity", "lump_sum"],
+        index=0,
+        format_func=lambda x: {
+            "annuity": "Annuity (0% tax after 60)",
+            "lump_sum": "Lump Sum (25% on real gains)",
+        }[x],
+        help="How you plan to withdraw from Provident Fund. Annuity after 60 = 0% tax on gains.",
     )
 
-    # Fee warnings
-    inputs = InvestmentInputs(
-        start_age=start_age,
-        withdraw_age=withdraw_age,
-        monthly_contribution=monthly_contribution,
-        annual_cap=annual_cap,
-        expected_return=expected_return,
-        fee_aum=fee_aum,
-        fee_deposit=fee_deposit,
-        inflation=inflation,
+    # Show tax implication
+    if withdrawal_mode == "annuity" and retirement_age >= 60:
+        st.sidebar.success("**Tax Benefit Active:** 0% capital gains tax on Provident Fund")
+    elif withdrawal_mode == "lump_sum":
+        st.sidebar.warning("**Tax applies:** 25% on real (inflation-adjusted) gains")
+
+    return ProvidentInputs(
+        current_age=current_age,
+        retirement_age=retirement_age,
+        life_expectancy=life_expectancy,
+        annual_contribution=float(annual_contribution),
+        annual_cap=float(annual_cap),
+        provident_expected_return=provident_expected_return,
+        personal_expected_return=personal_expected_return,
+        inflation_rate=inflation_rate,
+        provident_mgmt_fee=provident_mgmt_fee,
+        personal_mgmt_fee=personal_mgmt_fee,
+        capital_gains_tax=capital_gains_tax,
         withdrawal_mode=withdrawal_mode,
     )
 
-    warnings = inputs.validate_fees()
-    for warning in warnings:
-        st.sidebar.warning(f"⚠️ {warning}")
 
-    # Show summary
+def render_quick_scenarios() -> None:
+    """Render quick scenario buttons in the sidebar."""
+    st.sidebar.subheader("Quick Scenarios")
+    st.sidebar.markdown(
+        """
+        **Common scenarios:**
+        - **Young investor (30):** Long horizon, maximize annuity benefit
+        - **Mid-career (45):** Balance between options
+        - **Near retirement (55):** Short horizon, limited benefit
+        """
+    )
+
+
+def render_info_box() -> None:
+    """Render information box about the comparison."""
     st.sidebar.divider()
-    st.sidebar.subheader("Summary")
-
-    years = inputs.years_of_contribution
-    max_yearly = monthly_contribution * 12
-    actual_yearly = min(max_yearly, annual_cap)
-
-    st.sidebar.markdown(f"""
-    - **Duration**: {years} years
-    - **Yearly Target**: ₪{max_yearly:,.0f}
-    - **Effective Yearly** (after cap): ₪{actual_yearly:,.0f}
-    - **Net Return**: {inputs.get_net_return():.2%}
-    - **Tax-Free Eligible**: {'✅ Yes' if inputs.is_annuity_eligible() else '❌ No (age < 60)'}
-    """)
-
-    return inputs
-
-
-def render_comparison_sidebar() -> dict:
-    """
-    Render sidebar inputs for comparison mode.
-
-    Returns:
-        Dict with comparison parameters
-    """
-    st.sidebar.header("📊 Comparison Settings")
-
-    compare_ages = st.sidebar.multiselect(
-        "Starting Ages to Compare",
-        options=[25, 30, 35, 40, 45, 50, 55, 59],
-        default=[30, 40, 50, 59],
-        help="Select multiple starting ages for comparison",
+    st.sidebar.markdown(
+        """
+        ### Key Points
+        
+        **Provident Fund (קופת גמל להשקעה):**
+        - Annual cap: ~₪83,641 (2026)
+        - Lump sum: 25% tax on **real** gains
+        - Annuity after 60: **0%** tax
+        
+        **Personal Account:**
+        - No contribution limit
+        - 25% tax on **nominal** gains
+        - Lower management fees (ETFs)
+        """
     )
-
-    compare_fees = st.sidebar.multiselect(
-        "Fee Levels to Compare",
-        options=["0.40%", "0.55%", "0.65%", "0.80%", "1.05%"],
-        default=["0.40%", "0.65%", "1.05%"],
-        help="Select fee levels for sensitivity analysis",
-    )
-
-    # Convert fee strings to floats
-    fee_map = {
-        "0.40%": 0.004,
-        "0.55%": 0.0055,
-        "0.65%": 0.0065,
-        "0.80%": 0.008,
-        "1.05%": 0.0105,
-    }
-    fee_values = [fee_map[f] for f in compare_fees]
-
-    return {
-        "ages": compare_ages,
-        "fees": fee_values,
-    }

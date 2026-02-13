@@ -1,241 +1,220 @@
-"""
-Data models for Gemel Lehashkaa (Investment Provident Fund) analysis.
+"""Data models for Provident Fund vs Personal Investment comparison."""
 
-These models define the input parameters and output results for simulating
-investment scenarios in Israeli Investment Provident Funds.
-"""
-
-from dataclasses import dataclass, field
-from typing import Literal
-
-
-# ============================================================================
-# Constants (from Israeli regulations)
-# ============================================================================
-
-ANNUAL_CAP_2026 = 83_641  # NIS - annual contribution cap for 2026
-MAX_FEE_AUM = 0.0105  # 1.05% - maximum annual AUM fee
-MAX_FEE_DEPOSIT = 0.04  # 4% - maximum deposit fee
-MAX_FEE_ANNUITY = 0.006  # 0.6% - maximum fee for annuity recipients
-CAPITAL_GAINS_TAX = 0.25  # 25% on real (inflation-adjusted) gains
-ANNUITY_MIN_AGE = 60  # Minimum age for tax-free annuity conversion
-
-
-# ============================================================================
-# Input Models
-# ============================================================================
+from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
-class InvestmentInputs:
-    """
-    Input parameters for Investment Provident Fund simulation.
+class ProvidentInputs:
+    """Input parameters for the investment comparison."""
 
-    Attributes:
-        start_age: Age when contributions begin (e.g., 30, 40, 50)
-        withdraw_age: Target withdrawal age (typically 60 for annuity benefit)
-        monthly_contribution: Monthly contribution amount in NIS
-        annual_cap: Annual contribution cap in NIS (default: 83,641 for 2026)
-        expected_return: Expected annual nominal return (e.g., 0.05 for 5%)
-        fee_aum: Annual AUM (assets under management) fee (e.g., 0.0065 for 0.65%)
-        fee_deposit: Fee on deposits (e.g., 0.0 for 0%, often waived)
-        inflation: Expected annual inflation rate (e.g., 0.025 for 2.5%)
-        capital_gains_tax: Tax rate on real gains for lump sum (default: 0.25)
-        withdrawal_mode: "lump" for lump sum or "annuity" for tax-free annuity
-    """
+    current_age: int  # Current age of the investor
+    retirement_age: int  # Target withdrawal age (typically 60 for annuity benefit)
+    life_expectancy: int  # Expected age at death (for withdrawal calculations)
+    annual_contribution: float  # Annual contribution amount in NIS
+    annual_cap: float  # Annual contribution cap (83,641 for 2026)
+    provident_expected_return: float  # Expected annual return for provident fund (e.g., 0.07 for 7%)
+    personal_expected_return: float  # Expected annual return for personal account (e.g., 0.08 for 8%)
+    inflation_rate: float  # Annual inflation rate for real gains calculation
+    provident_mgmt_fee: float  # Annual management fee for provident fund (e.g., 0.006 for 0.6%)
+    personal_mgmt_fee: float  # Annual management fee for personal account (e.g., 0.001 for 0.1%)
+    capital_gains_tax: float  # Capital gains tax rate (e.g., 0.25 for 25%)
+    withdrawal_mode: str  # "lump_sum" or "annuity"
 
-    start_age: int
-    withdraw_age: int
-    monthly_contribution: float
-    annual_cap: float = ANNUAL_CAP_2026
-    expected_return: float = 0.05  # 5% default
-    fee_aum: float = 0.0065  # 0.65% default (market average)
-    fee_deposit: float = 0.0  # Often 0% in practice
-    inflation: float = 0.025  # 2.5% default
-    capital_gains_tax: float = CAPITAL_GAINS_TAX
-    withdrawal_mode: Literal["lump", "annuity"] = "annuity"
+    def get_provident_net_return(self) -> float:
+        """Calculate the net return for Provident Fund after management fees."""
+        # Net return = (1 + gross) * (1 - fee) - 1
+        return (1 + self.provident_expected_return) * (1 - self.provident_mgmt_fee) - 1
 
-    def __post_init__(self):
-        """Validate inputs after initialization."""
-        if self.start_age >= self.withdraw_age:
-            raise ValueError("start_age must be less than withdraw_age")
-        if self.start_age < 0:
-            raise ValueError("start_age must be non-negative")
-        if self.monthly_contribution < 0:
-            raise ValueError("monthly_contribution must be non-negative")
-        if self.annual_cap < 0:
-            raise ValueError("annual_cap must be non-negative")
+    def get_personal_net_return(self) -> float:
+        """Calculate the net return for personal account after management fees."""
+        return (1 + self.personal_expected_return) * (1 - self.personal_mgmt_fee) - 1
 
-    @property
-    def years_of_contribution(self) -> int:
-        """Calculate the number of years of contributions."""
-        return self.withdraw_age - self.start_age
+    def get_investment_years(self) -> int:
+        """Calculate the number of years from current age to retirement."""
+        return max(0, self.retirement_age - self.current_age)
 
-    @property
-    def months_of_contribution(self) -> int:
-        """Calculate the number of months of contributions."""
-        return self.years_of_contribution * 12
-
-    def get_net_return(self) -> float:
-        """
-        Calculate net annual return after AUM fees.
-
-        Returns:
-            Net annual return rate
-        """
-        # Approximate: (1 + R) * (1 - fee) - 1
-        return (1 + self.expected_return) * (1 - self.fee_aum) - 1
-
-    def validate_fees(self) -> list[str]:
-        """
-        Validate that fees don't exceed legal caps.
-
-        Returns:
-            List of warning messages (empty if all valid)
-        """
-        warnings = []
-        if self.fee_aum > MAX_FEE_AUM:
-            warnings.append(
-                f"AUM fee ({self.fee_aum:.2%}) exceeds legal cap ({MAX_FEE_AUM:.2%})"
-            )
-        if self.fee_deposit > MAX_FEE_DEPOSIT:
-            warnings.append(
-                f"Deposit fee ({self.fee_deposit:.2%}) exceeds legal cap ({MAX_FEE_DEPOSIT:.2%})"
-            )
-        return warnings
-
-    def is_annuity_eligible(self) -> bool:
-        """Check if withdrawal age qualifies for tax-free annuity."""
-        return self.withdraw_age >= ANNUITY_MIN_AGE
-
-
-# ============================================================================
-# Result Models
-# ============================================================================
-
-
-@dataclass
-class MonthlyResult:
-    """
-    Result for a single month in the simulation.
-
-    Attributes:
-        month: Month number (0-indexed from start)
-        age: Age at this month (float for precision)
-        balance: Account balance at end of month
-        contribution: Contribution made this month
-        real_basis: Inflation-adjusted basis up to this month
-        cumulative_contributions: Total contributions to date
-    """
-
-    month: int
-    age: float
-    balance: float
-    contribution: float
-    real_basis: float
-    cumulative_contributions: float
+    def get_effective_contribution(self) -> float:
+        """Get the effective annual contribution respecting the cap."""
+        return min(self.annual_contribution, self.annual_cap)
 
 
 @dataclass
 class YearlyResult:
-    """
-    Aggregated result for a single year in the simulation.
+    """Results for a single year in the comparison."""
 
-    Attributes:
-        year: Year number (1-indexed)
-        age: Age at end of year
-        balance: Account balance at end of year
-        contributions_ytd: Contributions made during this year
-        cumulative_contributions: Total contributions to date
-        real_basis: Inflation-adjusted basis at end of year
-    """
+    year: int  # Year number (1, 2, 3, ...)
+    age: int  # Age at this year
+    provident_fv: float  # Future value in Provident Fund (gross)
+    provident_contributions: float  # Total contributions to date
+    personal_fv: float  # Future value in personal account (gross)
+    personal_contributions: float  # Total contributions to date
 
-    year: int
-    age: int
-    balance: float
-    contributions_ytd: float
-    cumulative_contributions: float
-    real_basis: float
+    @property
+    def provident_gain(self) -> float:
+        """Nominal gain in Provident Fund."""
+        return self.provident_fv - self.provident_contributions
+
+    @property
+    def personal_gain(self) -> float:
+        """Nominal gain in personal account."""
+        return self.personal_fv - self.personal_contributions
 
 
 @dataclass
-class SimulationResult:
-    """
-    Complete result of a provident fund simulation.
+class TaxCalculation:
+    """Tax calculation details for a withdrawal."""
 
-    Attributes:
-        inputs: The input parameters used for simulation
-        monthly_results: List of monthly results
-        yearly_results: List of yearly aggregated results
-        gross_balance: Final balance before tax
-        total_contributions: Sum of all contributions made
-        real_basis: Inflation-adjusted cost basis at withdrawal
-        real_gain: Gain after adjusting for inflation
-        tax_amount: Tax due on withdrawal (0 for annuity after 60)
-        net_balance: Final balance after tax
-        cap_was_binding: True if annual cap limited contributions
-        cap_limited_amount: Total amount that couldn't be contributed due to cap
-    """
-
-    inputs: InvestmentInputs
-    monthly_results: list[MonthlyResult] = field(default_factory=list)
-    yearly_results: list[YearlyResult] = field(default_factory=list)
-    gross_balance: float = 0.0
-    total_contributions: float = 0.0
-    real_basis: float = 0.0
-    real_gain: float = 0.0
-    tax_amount: float = 0.0
-    net_balance: float = 0.0
-    cap_was_binding: bool = False
-    cap_limited_amount: float = 0.0
+    gross_balance: float  # Balance before tax
+    total_contributions: float  # Sum of all contributions
+    inflation_adjusted_contributions: float  # Contributions adjusted for inflation
+    nominal_gain: float  # gross_balance - total_contributions
+    real_gain: float  # gross_balance - inflation_adjusted_contributions
+    tax_amount: float  # Tax to be paid
+    net_balance: float  # Balance after tax
 
     @property
     def effective_tax_rate(self) -> float:
-        """Calculate effective tax rate on total gains."""
-        nominal_gain = self.gross_balance - self.total_contributions
-        if nominal_gain <= 0:
+        """Calculate the effective tax rate on the gross balance."""
+        if self.gross_balance == 0:
             return 0.0
-        return self.tax_amount / nominal_gain
-
-    @property
-    def tax_savings_from_annuity(self) -> float:
-        """
-        Calculate how much tax would be saved by choosing annuity over lump sum.
-
-        Only relevant if withdrawal_mode is 'annuity' and age >= 60.
-        """
-        if self.inputs.withdrawal_mode == "annuity" and self.inputs.is_annuity_eligible():
-            # Tax that would have been paid with lump sum
-            potential_tax = self.inputs.capital_gains_tax * max(self.real_gain, 0)
-            return potential_tax
-        return 0.0
+        return self.tax_amount / self.gross_balance
 
 
 @dataclass
-class ComparisonResult:
-    """
-    Result comparing multiple scenarios (e.g., different start ages).
+class AgeComparisonResult:
+    """Comparison result for a specific starting age."""
 
-    Attributes:
-        scenarios: Dict mapping scenario name to SimulationResult
-        baseline_name: Name of the baseline scenario for comparison
-    """
+    starting_age: int  # Age at which investment started
+    retirement_age: int  # Target withdrawal age
+    investment_years: int  # Number of years invested
+    
+    # Provident Fund results
+    provident_gross: float  # Gross balance at retirement
+    provident_contributions: float  # Total contributions
+    provident_tax: float  # Tax paid (0 for annuity, 25% real for lump sum)
+    provident_net: float  # Net balance after tax
+    
+    # Personal account results
+    personal_gross: float  # Gross balance at retirement
+    personal_contributions: float  # Total contributions
+    personal_tax: float  # Tax paid (25% on nominal gains)
+    personal_net: float  # Net balance after tax
+    
+    # Comparison
+    withdrawal_mode: str  # "lump_sum" or "annuity"
 
-    scenarios: dict[str, SimulationResult] = field(default_factory=dict)
-    baseline_name: str = ""
+    @property
+    def difference(self) -> float:
+        """Net difference (provident - personal). Positive = Provident wins."""
+        return self.provident_net - self.personal_net
 
-    def get_differences(self) -> dict[str, float]:
-        """
-        Calculate difference in net balance vs baseline for each scenario.
+    @property
+    def difference_pct(self) -> float:
+        """Percentage difference relative to personal account."""
+        if self.personal_net == 0:
+            return 0.0
+        return (self.provident_net - self.personal_net) / self.personal_net * 100
 
-        Returns:
-            Dict mapping scenario name to difference from baseline
-        """
-        if not self.baseline_name or self.baseline_name not in self.scenarios:
-            return {}
+    @property
+    def winner(self) -> str:
+        """Which option wins."""
+        if self.difference > 0:
+            return "Provident Fund"
+        elif self.difference < 0:
+            return "Personal Account"
+        else:
+            return "Tie"
 
-        baseline_net = self.scenarios[self.baseline_name].net_balance
-        return {
-            name: result.net_balance - baseline_net
-            for name, result in self.scenarios.items()
-        }
+    @property
+    def provident_wins(self) -> bool:
+        """True if Provident Fund has higher net value."""
+        return self.difference > 0
+
+
+@dataclass
+class ComparisonSummary:
+    """Summary of the full comparison across all ages."""
+
+    inputs: ProvidentInputs
+    age_results: list[AgeComparisonResult]  # Results for each starting age
+    crossover_age: Optional[int]  # Age where Provident becomes better (None if never)
+    provident_net_return: float  # Calculated net return for Provident Fund
+    personal_net_return: float  # Calculated net return for personal account
+
+    @property
+    def current_age_result(self) -> Optional[AgeComparisonResult]:
+        """Get the result for the user's current age."""
+        for result in self.age_results:
+            if result.starting_age == self.inputs.current_age:
+                return result
+        return None
+
+    @property
+    def winner_at_current_age(self) -> str:
+        """Which option wins at the user's current age."""
+        result = self.current_age_result
+        if result:
+            return result.winner
+        return "Unknown"
+
+    @property
+    def has_crossover(self) -> bool:
+        """Whether there is a crossover point."""
+        return self.crossover_age is not None
+
+
+@dataclass
+class SensitivityPoint:
+    """A single point in sensitivity analysis."""
+
+    return_rate: float
+    inflation_rate: float
+    crossover_age: Optional[int]
+    provident_advantage_at_30: float  # Difference if starting at age 30
+
+
+@dataclass
+class MonthlyWithdrawalResult:
+    """Results for monthly withdrawal (קצבה) comparison."""
+
+    # Provident Fund (annuity mode - 0% tax)
+    provident_balance: float  # Total balance at retirement
+    provident_contributions: float  # Total contributions
+    provident_gross_monthly: float  # Monthly withdrawal before any considerations
+    provident_net_monthly: float  # Net monthly withdrawal (same as gross for annuity)
+    
+    # Personal Account (25% tax on gains portion)
+    personal_balance: float  # Total balance at retirement
+    personal_contributions: float  # Total contributions
+    personal_gross_monthly: float  # Monthly withdrawal before tax
+    personal_net_monthly: float  # Net monthly withdrawal after tax on gains
+    personal_tax_per_month: float  # Tax paid per month
+    
+    # Comparison
+    withdrawal_years: int  # Number of years in retirement
+    withdrawal_return: float  # Expected return during withdrawal period
+
+    @property
+    def monthly_difference(self) -> float:
+        """Net monthly difference (provident - personal). Positive = Provident wins."""
+        return self.provident_net_monthly - self.personal_net_monthly
+
+    @property
+    def monthly_difference_pct(self) -> float:
+        """Percentage difference in monthly withdrawal."""
+        if self.personal_net_monthly == 0:
+            return 0.0
+        return (self.provident_net_monthly - self.personal_net_monthly) / self.personal_net_monthly * 100
+
+    @property
+    def personal_gain_ratio(self) -> float:
+        """Ratio of gains to total balance in personal account."""
+        if self.personal_balance == 0:
+            return 0.0
+        return (self.personal_balance - self.personal_contributions) / self.personal_balance
+
+    @property
+    def lifetime_tax_savings(self) -> float:
+        """Total tax saved over retirement by using provident fund annuity."""
+        return self.personal_tax_per_month * 12 * self.withdrawal_years
